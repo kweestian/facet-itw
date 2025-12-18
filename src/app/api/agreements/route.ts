@@ -1,16 +1,38 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { agreements } from "@/lib/db/schema";
-import { desc } from "drizzle-orm";
+import { agreements, riskAssessments, policyRules } from "@/lib/db/schema";
+import { desc, eq } from "drizzle-orm";
 
 export async function GET() {
   try {
-    const agreementsList = await db
+    const agreementsList = db
       .select()
       .from(agreements)
-      .orderBy(desc(agreements.createdAt));
+      .orderBy(desc(agreements.createdAt))
+      .all();
 
-    return NextResponse.json(agreementsList);
+    // Get assessments for each agreement (synchronous queries)
+    const agreementsWithAssessments = agreementsList.map((agreement) => {
+      const assessments = db
+        .select({
+          assessment: riskAssessments,
+          rule: policyRules,
+        })
+        .from(riskAssessments)
+        .innerJoin(policyRules, eq(riskAssessments.ruleId, policyRules.id))
+        .where(eq(riskAssessments.agreementId, agreement.id))
+        .all();
+
+      return {
+        ...agreement,
+        assessments: assessments.map((a) => ({
+          ...a.assessment,
+          rule: a.rule,
+        })),
+      };
+    });
+
+    return NextResponse.json(agreementsWithAssessments);
   } catch (error) {
     console.error("Error fetching agreements:", error);
     return NextResponse.json(
