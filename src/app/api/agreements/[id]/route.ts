@@ -1,31 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { agreements, riskAssessments, policyRules } from "@/lib/db/schema";
+import { eq } from "drizzle-orm";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
+
   try {
-    const { id } = await params;
-    const agreement = await db.agreement.findUnique({
-      where: { id },
-      include: {
-        entity: true,
-        clauses: {
-          include: {
-            assessments: {
-              include: {
-                rule: true,
-                evidence: true,
-              },
-            },
-          },
-          orderBy: {
-            clauseNumber: "asc",
-          },
-        },
-      },
-    });
+    const agreement = db
+      .select()
+      .from(agreements)
+      .where(eq(agreements.id, id))
+      .limit(1)
+      .get();
 
     if (!agreement) {
       return NextResponse.json(
@@ -34,7 +24,24 @@ export async function GET(
       );
     }
 
-    return NextResponse.json(agreement);
+    // Get assessments with rules
+    const assessments = db
+      .select({
+        assessment: riskAssessments,
+        rule: policyRules,
+      })
+      .from(riskAssessments)
+      .innerJoin(policyRules, eq(riskAssessments.ruleId, policyRules.id))
+      .where(eq(riskAssessments.agreementId, id))
+      .all();
+
+    return NextResponse.json({
+      ...agreement,
+      assessments: assessments.map((a) => ({
+        ...a.assessment,
+        rule: a.rule,
+      })),
+    });
   } catch (error) {
     console.error("Error fetching agreement:", error);
     return NextResponse.json(
@@ -48,11 +55,10 @@ export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const { id } = await params;
+
   try {
-    const { id } = await params;
-    await db.agreement.delete({
-      where: { id },
-    });
+    db.delete(agreements).where(eq(agreements.id, id)).run();
 
     return NextResponse.json({ success: true });
   } catch (error) {
@@ -63,4 +69,3 @@ export async function DELETE(
     );
   }
 }
-

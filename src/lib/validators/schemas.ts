@@ -1,54 +1,55 @@
 import { z } from "zod";
 
-export const legalEntitySchema = z.object({
-  name: z.string().min(1, "Name is required"),
-  entityType: z.string().min(1, "Entity type is required"),
-});
+// Enums matching schema
+export const RiskScore = z.enum(["GREEN", "YELLOW", "RED"]);
+export const RuleSeverity = z.enum(["SHOW_STOPPER", "NEGOTIABLE", "COMPLIANT"]);
+export const FlagColor = z.enum(["GREEN", "YELLOW", "RED"]);
 
+// Agreement Schema (simplified)
 export const agreementSchema = z.object({
   title: z.string().min(1, "Title is required"),
-  fullText: z.string().min(10, "Agreement text must be at least 10 characters"),
-  entityId: z.string().min(1, "Legal entity is required"),
+  rawText: z.string().min(10, "Agreement text must be at least 10 characters"),
 });
 
-export const clauseSchema = z.object({
-  clauseNumber: z.string().optional(),
-  title: z.string().optional(),
-  content: z.string().min(1, "Clause content is required"),
-  startOffset: z.number().int().nonnegative().optional(),
-  endOffset: z.number().int().nonnegative().optional(),
-});
-
+// PolicyRule Schema
 export const policyRuleSchema = z.object({
-  name: z.string().min(1, "Rule name is required"),
+  ruleId: z.string().min(1, "Rule ID is required"),
+  name: z.string().min(1, "Name is required"),
   description: z.string().min(1, "Description is required"),
-  ruleText: z.string().min(1, "Rule text is required"),
-  category: z.string().min(1, "Category is required"),
-  severity: z.enum(["low", "medium", "high"]).default("medium"),
-  isActive: z.boolean().default(true),
+  acceptanceCriteria: z.string().min(1, "Acceptance criteria is required"),
+  severity: RuleSeverity,
+  isActive: z.boolean().optional().default(true),
 });
 
+// RiskAssessment Schema
 export const riskAssessmentSchema = z.object({
-  clauseId: z.string().min(1),
+  agreementId: z.string().min(1),
   ruleId: z.string().min(1),
-  riskLevel: z.enum(["green", "yellow", "red"]),
-  explanation: z.string().min(1),
-  confidence: z.number().min(0).max(1).optional(),
+  flagColor: FlagColor,
+  explanation: z.string().min(1, "Explanation is required"),
+  evidenceText: z.string().optional().nullable(),
 });
 
-export const fullTextSchema = z.object({
-  assessmentId: z.string().min(1),
-  evidenceText: z.string().min(1),
-  startOffset: z.number().int().nonnegative(),
-  endOffset: z.number().int().nonnegative(),
-  contextBefore: z.string().optional(),
-  contextAfter: z.string().optional(),
+// AI Response Schemas - for validating AI analysis output
+export const policyCheckResultSchema = z.object({
+  ruleId: z.string().min(1, "Rule ID is required"),
+  flagColor: FlagColor,
+  explanation: z.string().min(1, "Explanation is required"),
+  evidenceText: z
+    .string()
+    .optional()
+    .describe("Exact text from the NDA that supports the assessment"),
+  lineNumber: z
+    .number()
+    .optional()
+    .describe(
+      "Line number in the NDA where the issue was found (if applicable)"
+    ),
 });
 
-export type LegalEntityInput = z.infer<typeof legalEntitySchema>;
-export type AgreementInput = z.infer<typeof agreementSchema>;
-export type ClauseInput = z.infer<typeof clauseSchema>;
-export type PolicyRuleInput = z.infer<typeof policyRuleSchema>;
-export type RiskAssessmentInput = z.infer<typeof riskAssessmentSchema>;
-export type FullTextInput = z.infer<typeof fullTextSchema>;
-
+export const policyChecklistAnalysisSchema = z.object({
+  results: z
+    .array(policyCheckResultSchema)
+    .min(1, "At least one result is required"),
+  overallRiskScore: FlagColor,
+});

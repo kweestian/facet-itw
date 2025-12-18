@@ -1,4 +1,22 @@
-export type RiskLevel = "green" | "yellow" | "red";
+// Type exports matching Prisma enums
+export type LegalEntityRole = "DISCLOSER" | "RECIPIENT" | "MUTUAL";
+export type AgreementType = "MUTUAL" | "ONE_WAY";
+export type RiskScore = "GREEN" | "YELLOW" | "RED";
+export type ClauseCategory =
+  | "CONFIDENTIALITY"
+  | "TERM"
+  | "INDEMNITY"
+  | "REMEDIES"
+  | "GOVERNING_LAW"
+  | "NON_SOLICIT"
+  | "MUTUALITY"
+  | "EXCEPTIONS";
+export type RuleSeverity = "SHOW_STOPPER" | "NEGOTIABLE" | "COMPLIANT";
+export type AssessmentStatus = "PASS" | "FAIL";
+export type FlagColor = "GREEN" | "YELLOW" | "RED";
+
+// Legacy type for backward compatibility (maps to FlagColor)
+export type RiskLevel = FlagColor;
 
 export interface AnalysisProgress {
   clauseId: string;
@@ -13,7 +31,8 @@ export interface AnalysisResult {
   assessments: Array<{
     ruleId: string;
     ruleName: string;
-    riskLevel: RiskLevel;
+    flagColor: FlagColor;
+    status: AssessmentStatus;
     explanation: string;
     evidence: Array<{
       text: string;
@@ -22,4 +41,3 @@ export interface AnalysisResult {
     }>;
   }>;
 }
-

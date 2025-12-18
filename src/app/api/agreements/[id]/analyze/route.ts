@@ -1,8 +1,14 @@
 import { NextRequest } from "next/server";
 import { db } from "@/lib/db";
-import { extractClauses } from "@/lib/ai/extractor";
-import { analyzeClauseAgainstRule } from "@/lib/ai/analyzer";
-import { streamText } from "ai";
+import {
+  agreements,
+  policyRules,
+  riskAssessments,
+  auditTrails,
+} from "@/lib/db/schema";
+import { analyzeNDAAgainstPolicyChecklist } from "@/lib/ai/analyzer";
+import { AuditTrailLogger } from "@/lib/audit/audit-trail";
+import { eq } from "drizzle-orm";
 
 export async function POST(
   request: NextRequest,
@@ -10,176 +16,118 @@ export async function POST(
 ) {
   const { id } = await params;
 
-  const agreement = await db.agreement.findUnique({
-    where: { id },
-    include: {
-      clauses: true,
-    },
-  });
+  console.log(`Starting analysis for agreement ${id}`);
 
-  if (!agreement) {
-    return new Response(JSON.stringify({ error: "Agreement not found" }), {
-      status: 404,
-    });
-  }
+  try {
+    // Get agreement
+    const agreement = db
+      .select()
+      .from(agreements)
+      .where(eq(agreements.id, id))
+      .limit(1)
+      .get();
 
-  // Get all active policy rules
-  const rules = await db.policyRule.findMany({
-    where: { isActive: true },
-  });
+    if (!agreement) {
+      console.error(`Agreement ${id} not found`);
+      return new Response(JSON.stringify({ error: "Agreement not found" }), {
+        status: 404,
+      });
+    }
 
-  if (rules.length === 0) {
+    console.log(`Found agreement: ${agreement.title}`);
+
+    // Get all active policy rules
+    const rules = db
+      .select()
+      .from(policyRules)
+      .where(eq(policyRules.isActive, true))
+      .all();
+
+    if (rules.length === 0) {
+      console.error("No active policy rules found");
+      return new Response(
+        JSON.stringify({ error: "No active policy rules found" }),
+        { status: 400 }
+      );
+    }
+
+    console.log(`Found ${rules.length} active policy rules`);
+
+    // Initialize audit trail logger
+    const auditLogger = new AuditTrailLogger(id);
+
+    // Delete existing audit trails for this agreement
+    db.delete(auditTrails).where(eq(auditTrails.agreementId, id)).run();
+
+    // Analyze NDA against policy checklist
+    console.log("Calling AI analyzer...");
+    const analysis = await analyzeNDAAgainstPolicyChecklist(
+      agreement.rawText,
+      rules.map((r) => ({
+        id: r.id, // Database UUID
+        ruleId: r.ruleId, // String identifier
+        name: r.name,
+        description: r.description,
+        acceptanceCriteria: r.acceptanceCriteria,
+        severity: r.severity as "SHOW_STOPPER" | "NEGOTIABLE" | "COMPLIANT",
+      })),
+      auditLogger
+    );
+
+    console.log(`Analysis complete. Results: ${analysis.results.length}`);
+
+    // Save audit trail
+    await auditLogger.save();
+
+    // Delete existing assessments for this agreement
+    db.delete(riskAssessments).where(eq(riskAssessments.agreementId, id)).run();
+
+    // Create new assessments
+    for (const result of analysis.results) {
+      const rule = rules.find((r) => r.ruleId === result.ruleId);
+      if (rule) {
+        db.insert(riskAssessments)
+          .values({
+            agreementId: id,
+            ruleId: rule.id,
+            flagColor: result.flagColor,
+            explanation: result.explanation,
+            evidenceText: result.evidenceText || null,
+          })
+          .run();
+      }
+    }
+
+    // Update agreement with overall risk score
+    db.update(agreements)
+      .set({
+        overallRiskScore: analysis.overallRiskScore,
+        analyzedAt: new Date(),
+      })
+      .where(eq(agreements.id, id))
+      .run();
+
     return new Response(
-      JSON.stringify({ error: "No active policy rules found" }),
-      { status: 400 }
+      JSON.stringify({
+        success: true,
+        overallRiskScore: analysis.overallRiskScore,
+        resultsCount: analysis.results.length,
+      }),
+      {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+  } catch (error) {
+    console.error("Analysis error:", error);
+    return new Response(
+      JSON.stringify({
+        error: error instanceof Error ? error.message : "Unknown error",
+      }),
+      {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }
     );
   }
-
-  // Create a readable stream for progress updates
-  const encoder = new TextEncoder();
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      try {
-        // Step 1: Extract clauses if not already extracted
-        let clauses = agreement.clauses;
-
-        if (clauses.length === 0) {
-          const sendProgress = (data: any) => {
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
-            );
-          };
-
-          sendProgress({
-            type: "progress",
-            status: "extracting",
-            message: "Extracting clauses from agreement...",
-          });
-
-          const extracted = await extractClauses(agreement.fullText);
-
-          // Save clauses to database
-          clauses = await Promise.all(
-            extracted.map((clause) =>
-              db.clause.create({
-                data: {
-                  agreementId: id,
-                  clauseNumber: clause.clauseNumber,
-                  title: clause.title,
-                  content: clause.content,
-                  startOffset: clause.startOffset,
-                  endOffset: clause.endOffset,
-                },
-              })
-            )
-          );
-
-          await db.agreement.update({
-            where: { id },
-            data: { status: "analyzed" },
-          });
-        }
-
-        // Step 2: Analyze each clause against each rule
-        const totalClauses = clauses.length;
-        let currentClause = 0;
-
-        for (const clause of clauses) {
-          currentClause++;
-
-          const sendProgress = (data: any) => {
-            controller.enqueue(
-              encoder.encode(`data: ${JSON.stringify(data)}\n\n`)
-            );
-          };
-
-          sendProgress({
-            type: "progress",
-            status: "analyzing",
-            clauseId: clause.id,
-            clauseNumber: clause.clauseNumber,
-            totalClauses,
-            currentClause,
-            message: `Analyzing clause ${currentClause} of ${totalClauses}...`,
-          });
-
-          // Analyze against each rule
-          for (const rule of rules) {
-            const match = await analyzeClauseAgainstRule(
-              clause.content,
-              rule.name,
-              rule.description,
-              rule.ruleText
-            );
-
-            // Only create assessment if there's a match or risk
-            if (match.matches || match.riskLevel !== "green") {
-              const assessment = await db.riskAssessment.create({
-                data: {
-                  clauseId: clause.id,
-                  ruleId: rule.id,
-                  riskLevel: match.riskLevel,
-                  explanation: match.explanation,
-                  confidence: match.confidence,
-                },
-              });
-
-              // Save evidence
-              if (match.evidence.length > 0) {
-                await Promise.all(
-                  match.evidence.map((ev) =>
-                    db.fullText.create({
-                      data: {
-                        assessmentId: assessment.id,
-                        evidenceText: ev.text,
-                        startOffset: ev.startOffset,
-                        endOffset: ev.endOffset,
-                      },
-                    })
-                  )
-                );
-              }
-            }
-          }
-        }
-
-        // Mark agreement as analyzed
-        await db.agreement.update({
-          where: { id },
-          data: {
-            status: "analyzed",
-            analyzedAt: new Date(),
-          },
-        });
-
-        sendProgress({
-          type: "complete",
-          message: "Analysis complete!",
-        });
-
-        controller.close();
-      } catch (error) {
-        console.error("Analysis error:", error);
-        controller.enqueue(
-          encoder.encode(
-            `data: ${JSON.stringify({
-              type: "error",
-              message: error instanceof Error ? error.message : "Unknown error",
-            })}\n\n`
-          )
-        );
-        controller.close();
-      }
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
-  });
 }
-

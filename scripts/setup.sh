@@ -34,3 +34,5 @@ echo "1. Edit .env and add your OPENAI_API_KEY"
 echo "2. Run 'npm run dev' to start the development server"
 echo "3. Open http://localhost:3000 in your browser"
 
+
+
